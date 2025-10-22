@@ -1,0 +1,745 @@
+# 📱 REACT NATIVE CHECKOUT FLOW - Complete Guide
+
+## 🎯 Overview
+This document details the complete checkout flow for the React Native mobile app, showing how it integrates with our Laravel backend and database structure.
+
+## 📊 Database Tables Involved
+
+### 1. ORDERS Table (Primary)
+```sql
+orders (11 columns):
+├── id (Primary Key)
+├── order_number (Unique identifier)
+├── user_id (Foreign Key to users table)
+├── status (ENUM: pending, confirmed, processing, delivered, cancelled)
+├── amount (DECIMAL: Total order amount)
+├── payment_status (ENUM: pending, success, failed)
+├── payment_receipt (VARCHAR: File path to uploaded receipt)
+├── delivery_address (TEXT: Customer delivery address)
+├── delivered_at (TIMESTAMP: When delivered, nullable)
+├── created_at (TIMESTAMP: Order creation)
+└── updated_at (TIMESTAMP: Last update)
+```
+
+### 2. ORDER_ITEMS Table (Order Details)
+```sql
+order_items (12 columns):
+├── id (Primary Key)
+├── order_id (Foreign Key to orders table)
+├── product_id (Foreign Key to products table)
+├── product_variant_id (Foreign Key, nullable)
+├── product_name (Product name at time of order)
+├── product_sku (Product SKU at time of order)
+├── quantity (INTEGER: Quantity ordered)
+├── unit_price (DECIMAL: Price per unit)
+├── total_price (DECIMAL: Total for this item)
+├── product_details (JSON: Product details snapshot)
+├── created_at (TIMESTAMP)
+└── updated_at (TIMESTAMP)
+```
+
+### 3. USERS Table (Customer Info)
+```sql
+users (relevant columns):
+├── id (Primary Key)
+├── name (Customer name)
+├── email (Customer email)
+├── phone (Customer phone)
+├── address (Customer address)
+└── ... (other user fields)
+```
+
+## 🛒 COMPLETE CHECKOUT FLOW
+
+### STEP 1: Cart Review & Checkout Initiation
+
+#### Frontend (React Native)
+```javascript
+// Cart Screen - Review items before checkout
+const CartScreen = () => {
+  const [cartItems, setCartItems] = useState([]);
+  const [totalAmount, setTotalAmount] = useState(0);
+
+  // Calculate total amount
+  useEffect(() => {
+    const total = cartItems.reduce((sum, item) => 
+      sum + (item.unit_price * item.quantity), 0
+    );
+    setTotalAmount(total);
+  }, [cartItems]);
+
+  const proceedToCheckout = () => {
+    navigation.navigate('CheckoutScreen', { 
+      cartItems, 
+      totalAmount 
+    });
+  };
+
+  return (
+    <View>
+      {/* Cart items display */}
+      <FlatList 
+        data={cartItems}
+        renderItem={({item}) => (
+          <CartItem 
+            product={item}
+            quantity={item.quantity}
+            price={item.unit_price}
+          />
+        )}
+      />
+      
+      {/* Total amount */}
+      <Text>Total: ₦{totalAmount.toLocaleString()}</Text>
+      
+      {/* Checkout button */}
+      <TouchableOpacity onPress={proceedToCheckout}>
+        <Text>Proceed to Checkout</Text>
+      </TouchableOpacity>
+    </View>
+  );
+};
+```
+
+### STEP 2: Delivery Address Input
+
+#### Frontend (React Native)
+```javascript
+// Checkout Screen - Address input
+const CheckoutScreen = ({ route }) => {
+  const { cartItems, totalAmount } = route.params;
+  const [deliveryAddress, setDeliveryAddress] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  return (
+    <ScrollView>
+      {/* Order Summary */}
+      <View style={styles.orderSummary}>
+        <Text>Order Summary</Text>
+        {cartItems.map(item => (
+          <Text key={item.id}>
+            {item.product_name} x {item.quantity} = ₦{item.total_price}
+          </Text>
+        ))}
+        <Text style={styles.total}>Total: ₦{totalAmount}</Text>
+      </View>
+
+      {/* Delivery Address */}
+      <View style={styles.addressSection}>
+        <Text>Delivery Address</Text>
+        <TextInput
+          style={styles.addressInput}
+          placeholder="Enter your full delivery address"
+          value={deliveryAddress}
+          onChangeText={setDeliveryAddress}
+          multiline={true}
+          numberOfLines={4}
+        />
+      </View>
+
+      {/* Place Order Button */}
+      <TouchableOpacity 
+        style={styles.placeOrderBtn}
+        onPress={placeOrder}
+        disabled={!deliveryAddress || isLoading}
+      >
+        <Text>
+          {isLoading ? 'Placing Order...' : 'Place Order'}
+        </Text>
+      </TouchableOpacity>
+    </ScrollView>
+  );
+};
+```
+
+### STEP 3: Order Creation (API Call)
+
+#### Frontend API Call
+```javascript
+const placeOrder = async () => {
+  setIsLoading(true);
+  
+  try {
+    const orderData = {
+      items: cartItems.map(item => ({
+        product_id: item.product_id,
+        product_variant_id: item.product_variant_id,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        total_price: item.unit_price * item.quantity
+      })),
+      delivery_address: deliveryAddress,
+      total_amount: totalAmount
+    };
+
+    const response = await fetch(`${API_BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${userToken}`,
+      },
+      body: JSON.stringify(orderData)
+    });
+
+    const result = await response.json();
+    
+    if (response.ok) {
+      // Order created successfully
+      navigation.navigate('PaymentScreen', { 
+        order: result.order 
+      });
+    } else {
+      Alert.alert('Error', result.message);
+    }
+  } catch (error) {
+    Alert.alert('Error', 'Failed to place order');
+  } finally {
+    setIsLoading(false);
+  }
+};
+```
+
+#### Backend API Endpoint
+```php
+// routes/api.php
+Route::middleware('auth:sanctum')->group(function () {
+    Route::post('/orders', [OrderController::class, 'store']);
+    Route::get('/orders', [OrderController::class, 'index']);
+    Route::get('/orders/{order}', [OrderController::class, 'show']);
+    Route::post('/orders/{order}/upload-receipt', [OrderController::class, 'uploadReceipt']);
+});
+```
+
+#### Backend Controller (OrderController.php)
+```php
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Order;
+use App\Models\OrderItem;
+use Illuminate\Http\Request;
+use Illuminate\Support\Str;
+
+class OrderController extends Controller
+{
+    public function store(Request $request)
+    {
+        $validated = $request->validate([
+            'items' => 'required|array|min:1',
+            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.quantity' => 'required|integer|min:1',
+            'items.*.unit_price' => 'required|numeric|min:0',
+            'delivery_address' => 'required|string|max:1000',
+            'total_amount' => 'required|numeric|min:0',
+        ]);
+
+        // Generate unique order number
+        $orderNumber = 'ORD-' . date('Y') . '-' . str_pad(
+            Order::whereYear('created_at', date('Y'))->count() + 1, 
+            6, '0', STR_PAD_LEFT
+        );
+
+        // Create order in ORDERS table
+        $order = Order::create([
+            'order_number' => $orderNumber,
+            'user_id' => auth()->id(),
+            'status' => 'pending',
+            'amount' => $validated['total_amount'],
+            'payment_status' => 'pending',
+            'delivery_address' => $validated['delivery_address'],
+        ]);
+
+        // Create order items in ORDER_ITEMS table
+        foreach ($validated['items'] as $item) {
+            $product = \App\Models\Product::find($item['product_id']);
+            
+            OrderItem::create([
+                'order_id' => $order->id,
+                'product_id' => $item['product_id'],
+                'product_variant_id' => $item['product_variant_id'] ?? null,
+                'product_name' => $product->name,
+                'product_sku' => $product->sku,
+                'quantity' => $item['quantity'],
+                'unit_price' => $item['unit_price'],
+                'total_price' => $item['unit_price'] * $item['quantity'],
+                'product_details' => json_encode([
+                    'description' => $product->description,
+                    'image' => $product->image,
+                ])
+            ]);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Order placed successfully',
+            'order' => $order->load('orderItems')
+        ], 201);
+    }
+}
+```
+
+### STEP 4: Payment Instructions Screen
+
+#### Frontend (React Native)
+```javascript
+const PaymentScreen = ({ route }) => {
+  const { order } = route.params;
+
+  return (
+    <ScrollView style={styles.container}>
+      {/* Order Details */}
+      <View style={styles.orderCard}>
+        <Text style={styles.orderNumber}>Order #{order.order_number}</Text>
+        <Text style={styles.amount}>Amount: ₦{order.amount}</Text>
+        <Text style={styles.status}>Status: {order.status}</Text>
+      </View>
+
+      {/* Payment Instructions */}
+      <View style={styles.paymentInstructions}>
+        <Text style={styles.title}>Payment Instructions</Text>
+        
+        <Text style={styles.step}>Step 1: Transfer ₦{order.amount} to:</Text>
+        <View style={styles.bankDetails}>
+          <Text>Bank: GTBank</Text>
+          <Text>Account Number: 0123456789</Text>
+          <Text>Account Name: Your Store Name</Text>
+        </View>
+
+        <Text style={styles.step}>Step 2: Upload payment receipt below</Text>
+        
+        <Text style={styles.note}>
+          Note: Your order will remain pending until we verify your payment receipt.
+        </Text>
+      </View>
+
+      {/* Upload Receipt Section */}
+      <ReceiptUploadSection orderId={order.id} />
+    </ScrollView>
+  );
+};
+```
+
+### STEP 5: Receipt Upload Functionality
+
+#### Frontend Component
+```javascript
+import { launchImageLibrary } from 'react-native-image-picker';
+
+const ReceiptUploadSection = ({ orderId }) => {
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [uploading, setUploading] = useState(false);
+
+  const selectImage = () => {
+    const options = {
+      mediaType: 'photo',
+      quality: 0.8,
+      maxWidth: 1024,
+      maxHeight: 1024,
+    };
+
+    launchImageLibrary(options, (response) => {
+      if (response.assets && response.assets[0]) {
+        setSelectedImage(response.assets[0]);
+      }
+    });
+  };
+
+  const uploadReceipt = async () => {
+    if (!selectedImage) {
+      Alert.alert('Error', 'Please select a receipt image');
+      return;
+    }
+
+    setUploading(true);
+
+    const formData = new FormData();
+    formData.append('payment_receipt', {
+      uri: selectedImage.uri,
+      type: selectedImage.type,
+      name: selectedImage.fileName || 'receipt.jpg',
+    });
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/orders/${orderId}/upload-receipt`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'multipart/form-data',
+            'Authorization': `Bearer ${userToken}`,
+          },
+          body: formData,
+        }
+      );
+
+      const result = await response.json();
+
+      if (response.ok) {
+        Alert.alert('Success', 'Receipt uploaded successfully! We will verify your payment shortly.');
+        navigation.navigate('OrderTrackingScreen', { orderId });
+      } else {
+        Alert.alert('Error', result.message);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to upload receipt');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <View style={styles.uploadSection}>
+      <Text style={styles.uploadTitle}>Upload Payment Receipt</Text>
+      
+      {selectedImage ? (
+        <View>
+          <Image source={{ uri: selectedImage.uri }} style={styles.previewImage} />
+          <TouchableOpacity onPress={selectImage} style={styles.changeImageBtn}>
+            <Text>Change Image</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <TouchableOpacity onPress={selectImage} style={styles.selectImageBtn}>
+          <Text>📷 Select Receipt Image</Text>
+        </TouchableOpacity>
+      )}
+
+      <TouchableOpacity 
+        onPress={uploadReceipt}
+        style={[styles.uploadBtn, { opacity: selectedImage ? 1 : 0.5 }]}
+        disabled={!selectedImage || uploading}
+      >
+        <Text>
+          {uploading ? 'Uploading...' : 'Upload Receipt'}
+        </Text>
+      </TouchableOpacity>
+    </View>
+  );
+};
+```
+
+#### Backend Receipt Upload Endpoint
+```php
+// OrderController.php
+public function uploadReceipt(Request $request, Order $order)
+{
+    // Validate that user owns this order
+    if ($order->user_id !== auth()->id()) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+
+    $request->validate([
+        'payment_receipt' => 'required|image|mimes:jpeg,png,jpg|max:5120', // 5MB max
+    ]);
+
+    try {
+        // Store the receipt file
+        $file = $request->file('payment_receipt');
+        $filename = $order->order_number . '_' . time() . '.' . $file->getClientOriginalExtension();
+        $path = $file->storeAs('receipts', $filename, 'public');
+
+        // Update order with receipt path in ORDERS table
+        $order->update([
+            'payment_receipt' => $path
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Receipt uploaded successfully',
+            'receipt_path' => $path
+        ]);
+
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Failed to upload receipt'
+        ], 500);
+    }
+}
+```
+
+### STEP 6: Order Tracking Screen
+
+#### Frontend (React Native)
+```javascript
+const OrderTrackingScreen = ({ route }) => {
+  const { orderId } = route.params;
+  const [order, setOrder] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchOrderDetails();
+    
+    // Poll for order updates every 30 seconds
+    const interval = setInterval(fetchOrderDetails, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const fetchOrderDetails = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/orders/${orderId}`, {
+        headers: {
+          'Authorization': `Bearer ${userToken}`,
+        },
+      });
+
+      const result = await response.json();
+      if (response.ok) {
+        setOrder(result.order);
+      }
+    } catch (error) {
+      console.error('Failed to fetch order details');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'pending': return '#FFA500';
+      case 'processing': return '#007BFF';
+      case 'delivered': return '#28A745';
+      case 'cancelled': return '#DC3545';
+      default: return '#6C757D';
+    }
+  };
+
+  const getPaymentStatusColor = (status) => {
+    switch (status) {
+      case 'pending': return '#FFA500';
+      case 'success': return '#28A745';
+      case 'failed': return '#DC3545';
+      default: return '#6C757D';
+    }
+  };
+
+  if (loading) {
+    return <LoadingSpinner />;
+  }
+
+  return (
+    <ScrollView style={styles.container}>
+      {/* Order Header */}
+      <View style={styles.orderHeader}>
+        <Text style={styles.orderNumber}>Order #{order.order_number}</Text>
+        <Text style={styles.orderDate}>
+          Placed on {new Date(order.created_at).toLocaleDateString()}
+        </Text>
+      </View>
+
+      {/* Status Timeline */}
+      <View style={styles.statusTimeline}>
+        <Text style={styles.sectionTitle}>Order Status</Text>
+        
+        <View style={styles.statusItem}>
+          <View style={[styles.statusDot, { backgroundColor: '#28A745' }]} />
+          <Text>Order Placed</Text>
+          <Text style={styles.statusTime}>
+            {new Date(order.created_at).toLocaleString()}
+          </Text>
+        </View>
+
+        <View style={styles.statusItem}>
+          <View style={[
+            styles.statusDot, 
+            { backgroundColor: order.payment_status === 'success' ? '#28A745' : '#FFA500' }
+          ]} />
+          <Text>Payment {order.payment_status === 'success' ? 'Verified' : 'Pending'}</Text>
+          {order.payment_receipt && (
+            <Text style={styles.statusNote}>Receipt uploaded</Text>
+          )}
+        </View>
+
+        <View style={styles.statusItem}>
+          <View style={[
+            styles.statusDot, 
+            { backgroundColor: order.status === 'processing' ? '#28A745' : '#D3D3D3' }
+          ]} />
+          <Text>Processing</Text>
+          {order.status === 'processing' && (
+            <Text style={styles.statusNote}>Your order is being prepared</Text>
+          )}
+        </View>
+
+        <View style={styles.statusItem}>
+          <View style={[
+            styles.statusDot, 
+            { backgroundColor: order.status === 'delivered' ? '#28A745' : '#D3D3D3' }
+          ]} />
+          <Text>Delivered</Text>
+          {order.delivered_at && (
+            <Text style={styles.statusTime}>
+              {new Date(order.delivered_at).toLocaleString()}
+            </Text>
+          )}
+        </View>
+      </View>
+
+      {/* Current Status */}
+      <View style={styles.currentStatus}>
+        <Text style={styles.sectionTitle}>Current Status</Text>
+        <View style={styles.statusBadge}>
+          <Text style={[styles.statusText, { color: getStatusColor(order.status) }]}>
+            {order.status.toUpperCase()}
+          </Text>
+        </View>
+        <View style={styles.statusBadge}>
+          <Text style={[styles.statusText, { color: getPaymentStatusColor(order.payment_status) }]}>
+            Payment: {order.payment_status.toUpperCase()}
+          </Text>
+        </View>
+      </View>
+
+      {/* Order Details */}
+      <View style={styles.orderDetails}>
+        <Text style={styles.sectionTitle}>Order Details</Text>
+        <Text>Amount: ₦{order.amount}</Text>
+        <Text>Delivery Address: {order.delivery_address}</Text>
+        
+        {order.payment_receipt && (
+          <TouchableOpacity 
+            onPress={() => viewReceipt(order.payment_receipt)}
+            style={styles.receiptBtn}
+          >
+            <Text>📄 View Uploaded Receipt</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      {/* Order Items */}
+      <View style={styles.orderItems}>
+        <Text style={styles.sectionTitle}>Items Ordered</Text>
+        {order.order_items?.map(item => (
+          <View key={item.id} style={styles.orderItem}>
+            <Text>{item.product_name}</Text>
+            <Text>Qty: {item.quantity}</Text>
+            <Text>₦{item.total_price}</Text>
+          </View>
+        ))}
+      </View>
+    </ScrollView>
+  );
+};
+```
+
+#### Backend Order Details Endpoint
+```php
+// OrderController.php
+public function show(Order $order)
+{
+    // Validate that user owns this order
+    if ($order->user_id !== auth()->id()) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+
+    $order->load('orderItems.product');
+
+    return response()->json([
+        'success' => true,
+        'order' => $order
+    ]);
+}
+
+public function index(Request $request)
+{
+    $orders = Order::where('user_id', auth()->id())
+        ->with('orderItems.product')
+        ->orderBy('created_at', 'desc')
+        ->paginate(10);
+
+    return response()->json([
+        'success' => true,
+        'orders' => $orders
+    ]);
+}
+```
+
+## 🔄 COMPLETE DATABASE FLOW
+
+### Order Creation Flow:
+```
+1. POST /api/orders
+   ↓
+2. Insert into ORDERS table:
+   - order_number: "ORD-2025-000001"
+   - user_id: 123
+   - status: "pending"
+   - payment_status: "pending"
+   - amount: 25000.00
+   - delivery_address: "Customer address"
+   ↓
+3. Insert into ORDER_ITEMS table (for each item):
+   - order_id: [new order ID]
+   - product_id: [product ID]
+   - quantity: [quantity]
+   - unit_price: [price]
+   - total_price: [calculated total]
+```
+
+### Receipt Upload Flow:
+```
+1. POST /api/orders/{id}/upload-receipt
+   ↓
+2. Store file in storage/app/public/receipts/
+   ↓
+3. Update ORDERS table:
+   - payment_receipt: "receipts/ORD-2025-000001_1729425600.jpg"
+```
+
+### Real-Time Status Update Flow:
+```
+1. Payment confirmed from dashboard
+   ↓
+2. ORDERS table updated:
+   - payment_status: "success"
+   - status: "processing"
+   ↓
+3. App polls for updates every 30 seconds
+   ↓
+4. User sees instant status change in app
+```
+
+### Delivery Status Flow:
+```
+1. Order marked as delivered from dashboard
+   ↓
+2. ORDERS table updated:
+   - status: "delivered"
+   - delivered_at: [current timestamp]
+   ↓
+3. App automatically shows "Delivered" status
+   ↓
+4. User receives real-time notification
+```
+
+## 📱 KEY REACT NATIVE SCREENS
+
+1. **CartScreen** - Review items before checkout
+2. **CheckoutScreen** - Enter delivery address, place order
+3. **PaymentScreen** - Payment instructions and receipt upload
+4. **OrderTrackingScreen** - Track order status in real-time
+5. **OrderHistoryScreen** - View all past orders
+
+## 🔗 API ENDPOINTS SUMMARY
+
+### Customer Endpoints:
+- `POST /api/orders` - Create new order
+- `GET /api/orders` - Get user's orders
+- `GET /api/orders/{id}` - Get specific order
+- `POST /api/orders/{id}/upload-receipt` - Upload payment receipt
+
+
+## 🎯 USER EXPERIENCE FLOW
+
+1. **Browse & Add to Cart** → Products stored in local state
+2. **Review Cart** → Calculate totals, proceed to checkout
+3. **Enter Address** → Input delivery details
+4. **Place Order** → Create order in database (status: pending)
+5. **Make Payment** → Transfer money to bank account
+6. **Upload Receipt** → Take photo and upload via app
+7. **Wait for Approval** → App shows real-time status updates when payment is confirmed from dashboard
+8. **Track Delivery** → App automatically updates status to "processing" then "delivered" in real-time
+9. **Order Complete** → Receive instant notification when order status changes to delivered
+
+This complete flow ensures seamless integration between your React Native app and Laravel backend, with proper database management and user experience!
